@@ -239,7 +239,8 @@ class BaseBot:
     def _get_help_message(self) -> str:
         return f"I'm your *{self.bot_name}*. Ask me anything related to my area of expertise!"
 
-    async def run(self):
+    def build_app(self):
+        """Build and return the Application with all handlers registered."""
         app = Application.builder().token(self.token).build()
 
         app.add_handler(CommandHandler("start", self.start))
@@ -249,5 +250,5 @@ class BaseBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
 
-        logger.info(f"{self.bot_name} is running...")
-        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info(f"{self.bot_name} is ready...")
+        return app
