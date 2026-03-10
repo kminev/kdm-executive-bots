@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  kdm-bots:
+    build: .
+    container_name: kdm-executive-bots
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
