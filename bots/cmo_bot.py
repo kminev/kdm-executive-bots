@@ -43,6 +43,7 @@ class CMOBot(BaseBot):
             token=os.environ["CMO_BOT_TOKEN"],
             bot_name="CMO — Chief Marketing Officer",
             system_prompt=CMO_SYSTEM_PROMPT,
+            brain_folder="cmo-brain",
         )
 
     def _get_welcome_message(self) -> str:

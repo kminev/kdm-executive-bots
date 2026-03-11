@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 from config.settings import MAX_FILE_SIZE_MB, ALLOWED_FILE_TYPES
+from brain.gdrive_loader import load_brain
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +36,35 @@ def _load_allowed_users() -> set[int]:
 
 
 class BaseBot:
-    def __init__(self, token: str, bot_name: str, system_prompt: str):
+    def __init__(self, token: str, bot_name: str, system_prompt: str, brain_folder: str):
         self.token = token
         self.bot_name = bot_name
         self.system_prompt = system_prompt
+        self.brain_folder = brain_folder  # e.g. "cfo-brain"
         self.anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.conversation_history: dict[int, list] = {}  # chat_id -> message list
-        self.uploaded_files: dict[int, list] = {}  # chat_id -> file context list
+        self.uploaded_files: dict[int, list] = {}        # chat_id -> file context list
         self.allowed_users: set[int] = _load_allowed_users()
+
+        # Load brain from GDrive at startup
+        self.brain_text, self.brain_loaded = self._load_brain()
+
+    def _load_brain(self) -> tuple[str, bool]:
+        """Load brain files from GDrive at startup."""
+        logger.info(f"🧠 Loading brain for {self.bot_name} from GDrive folder '{self.brain_folder}'...")
+        brain_text, success = load_brain(self.brain_folder)
+        if success and brain_text:
+            logger.info(f"✅ Brain loaded for {self.bot_name}")
+        elif success and not brain_text:
+            logger.info(f"📂 Brain folder empty for {self.bot_name} — running without brain context")
+        else:
+            logger.warning(f"⚠️  Brain unavailable for {self.bot_name} — GDrive unreachable")
+        return brain_text, success
 
     def _is_authorized(self, update: Update) -> bool:
         """Return True if the sender is in the allowed users list."""
         if not self.allowed_users:
-            return True  # No restriction set — allow all (not recommended)
+            return True
         return update.effective_user.id in self.allowed_users
 
     async def _deny(self, update: Update):
@@ -70,15 +87,23 @@ class BaseBot:
             await self._deny(update)
             return
         user = update.effective_user
+
+        brain_status = "🧠 Brain loaded" if (self.brain_loaded and self.brain_text) else \
+                       "📂 Brain folder empty" if self.brain_loaded else \
+                       "⚠️ Brain unavailable (GDrive unreachable)"
+
         await update.message.reply_text(
             f"👋 Hello {user.first_name}! I'm your *{self.bot_name}* for KDM Ventures LLC.\n\n"
             f"{self._get_welcome_message()}\n\n"
+            f"Status: {brain_status}\n\n"
             "Commands:\n"
             "• /start — Show this message\n"
             "• /clear — Clear conversation history\n"
             "• /files — List uploaded files\n"
+            "• /brain — Show brain status\n"
+            "• /reloadbrain — Reload brain from GDrive\n"
             "• /help — Get help\n\n"
-            "You can also upload PDF, TXT, or image files and I'll use them as context.",
+            "You can also upload PDF or TXT files and I'll use them as context.",
             parse_mode="Markdown",
         )
 
@@ -98,10 +123,51 @@ class BaseBot:
         chat_id = update.effective_chat.id
         file_list = self.uploaded_files.get(chat_id, [])
         if not file_list:
-            await update.message.reply_text("📂 No files uploaded yet.")
+            await update.message.reply_text("📂 No files uploaded in this session.")
         else:
             names = "\n".join(f"• {f['name']}" for f in file_list)
             await update.message.reply_text(f"📂 Uploaded files:\n{names}")
+
+    async def brain_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current brain status."""
+        if not self._is_authorized(update):
+            await self._deny(update)
+            return
+        if self.brain_loaded and self.brain_text:
+            size = len(self.brain_text)
+            await update.message.reply_text(
+                f"🧠 *Brain Status:* Loaded\n"
+                f"📁 Folder: `{self.brain_folder}`\n"
+                f"📊 Size: {size:,} characters",
+                parse_mode="Markdown"
+            )
+        elif self.brain_loaded:
+            await update.message.reply_text(
+                f"📂 *Brain Status:* Folder empty\n"
+                f"📁 Folder: `{self.brain_folder}`\n"
+                "Upload files to your GDrive brain folder and run /reloadbrain",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ *Brain Status:* Unavailable\n"
+                "GDrive is unreachable. Check your service account credentials.",
+                parse_mode="Markdown"
+            )
+
+    async def reload_brain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reload brain files from GDrive on demand."""
+        if not self._is_authorized(update):
+            await self._deny(update)
+            return
+        await update.message.reply_text("🔄 Reloading brain from GDrive...")
+        self.brain_text, self.brain_loaded = self._load_brain()
+        if self.brain_loaded and self.brain_text:
+            await update.message.reply_text(f"✅ Brain reloaded! ({len(self.brain_text):,} characters)")
+        elif self.brain_loaded:
+            await update.message.reply_text("📂 Brain folder is empty. Add files to GDrive and try again.")
+        else:
+            await update.message.reply_text("⚠️ Could not reach GDrive. Brain unavailable.")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -123,12 +189,18 @@ class BaseBot:
         if chat_id not in self.conversation_history:
             self.conversation_history[chat_id] = []
 
-        # Build context from uploaded files
-        file_context = ""
+        # Build full system prompt = base prompt + brain + session files
+        full_system = self.system_prompt
+
+        # Append brain knowledge base
+        if self.brain_text:
+            full_system += self.brain_text
+
+        # Append session-uploaded files
         if chat_id in self.uploaded_files and self.uploaded_files[chat_id]:
-            file_context = "\n\n--- UPLOADED FILE CONTEXT ---\n"
+            full_system += "\n\n--- SESSION UPLOADED FILES ---\n"
             for f in self.uploaded_files[chat_id]:
-                file_context += f"\nFile: {f['name']}\nContent:\n{f['content'][:3000]}\n---"
+                full_system += f"\nFile: {f['name']}\nContent:\n{f['content'][:3000]}\n---"
 
         self.conversation_history[chat_id].append({"role": "user", "content": user_text})
 
@@ -138,7 +210,7 @@ class BaseBot:
             response = self.anthropic_client.messages.create(
                 model="claude-opus-4-5",
                 max_tokens=2048,
-                system=self.system_prompt + file_context,
+                system=full_system,
                 messages=self.conversation_history[chat_id],
             )
 
@@ -147,7 +219,6 @@ class BaseBot:
                 {"role": "assistant", "content": assistant_reply}
             )
 
-            # Telegram message limit is 4096 chars; split if needed
             for chunk in self._split_message(assistant_reply):
                 await update.message.reply_text(chunk, parse_mode="Markdown")
 
@@ -164,14 +235,12 @@ class BaseBot:
         chat_id = update.effective_chat.id
         doc: Document = update.message.document
 
-        # Size check
         if doc.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
             await update.message.reply_text(
                 f"⚠️ File too large. Max size is {MAX_FILE_SIZE_MB}MB."
             )
             return
 
-        # Type check
         mime = doc.mime_type or ""
         if not any(t in mime for t in ALLOWED_FILE_TYPES):
             await update.message.reply_text(
@@ -184,20 +253,18 @@ class BaseBot:
         try:
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
-
             content = self._extract_text(file_bytes, mime, doc.file_name)
 
             if chat_id not in self.uploaded_files:
                 self.uploaded_files[chat_id] = []
 
-            # Replace if same filename exists
             self.uploaded_files[chat_id] = [
                 f for f in self.uploaded_files[chat_id] if f["name"] != doc.file_name
             ]
             self.uploaded_files[chat_id].append({"name": doc.file_name, "content": content})
 
             await update.message.reply_text(
-                f"✅ *{doc.file_name}* uploaded and ready! I'll use this as context in our conversation.",
+                f"✅ *{doc.file_name}* uploaded and ready!",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -239,13 +306,14 @@ class BaseBot:
     def _get_help_message(self) -> str:
         return f"I'm your *{self.bot_name}*. Ask me anything related to my area of expertise!"
 
-    def build_app(self):
-        """Build and return the Application with all handlers registered."""
+    def build_app(self) -> Application:
         app = Application.builder().token(self.token).build()
 
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("clear", self.clear))
         app.add_handler(CommandHandler("files", self.files))
+        app.add_handler(CommandHandler("brain", self.brain_status))
+        app.add_handler(CommandHandler("reloadbrain", self.reload_brain))
         app.add_handler(CommandHandler("help", self.help_command))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))

@@ -42,6 +42,7 @@ class CFOBot(BaseBot):
             token=os.environ["CFO_BOT_TOKEN"],
             bot_name="CFO — Chief Financial Officer",
             system_prompt=CFO_SYSTEM_PROMPT,
+            brain_folder="cfo-brain",
         )
 
     def _get_welcome_message(self) -> str:

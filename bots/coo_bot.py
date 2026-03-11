@@ -48,6 +48,7 @@ class COOBot(BaseBot):
             token=os.environ["COO_BOT_TOKEN"],
             bot_name="COO — Chief Operating Officer",
             system_prompt=COO_SYSTEM_PROMPT,
+            brain_folder="coo-brain",
         )
 
     def _get_welcome_message(self) -> str:

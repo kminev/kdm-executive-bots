@@ -1,5 +1,7 @@
-# Environment secrets — NEVER commit this
+# Secrets — NEVER commit these
 .env
+gdrive-creds.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -32,5 +34,3 @@ logs/
 
 # Uploads (local dev only)
 uploads/
-.DS_Store
-__MACOSX
